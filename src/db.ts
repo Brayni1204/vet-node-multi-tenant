@@ -1,4 +1,11 @@
+// src/db.ts
 import mysql from 'mysql2/promise';
+import dotenv from 'dotenv'; // Importamos dotenv aquí
+
+// Cargamos las variables de entorno. 
+// Esto asegura que estén disponibles antes de usar process.env
+// (Aunque index.ts también lo hace, es necesario aquí por el orden de importación)
+dotenv.config();
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
