@@ -33,6 +33,9 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
         return res.status(400).json({ message: 'Faltan campos obligatorios: tenant_id, name, email, password.' });
     }
 
+    const PROD_DOMAIN_BASE = 'veterinaria.techinnovats.com';
+    const LOCAL_DOMAIN_HOST = 'localhost:5173';
+
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -105,6 +108,8 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
 
         // 8. Commit de la transacción
         await connection.commit();
+        const productionUrl = `${tenant_id}.${PROD_DOMAIN_BASE}`;
+        const localUrl = `http://${tenant_id}.${LOCAL_DOMAIN_HOST}/`;
 
         res.status(201).json({
             message: 'Empresa y usuario administrador creados exitosamente!',
@@ -120,6 +125,10 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
                 email: email,
                 name: name,
                 is_admin: true,
+            },
+            access: { // <--- NUEVO OBJETO 'access'
+                productionUrl: productionUrl,
+                localUrl: localUrl
             }
         });
 
