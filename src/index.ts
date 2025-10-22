@@ -7,13 +7,19 @@ import path from 'path';
 // Rutas
 import authRoutes from './routes/authRoutes';
 import tenantRoutes from './routes/tenantRoutes';
-import serviceRoutes from './routes/serviceRoutes'; // 🆕 Importamos las rutas de servicio
+import serviceRoutes from './routes/serviceRoutes';
+import externalRoutes from './routes/externalRoutes';
 
 const app: Express = express();
 const port = process.env.PORT || 4000;
 
 // Middleware para resolver el tenantId del subdominio
 const resolveTenant = (req: Request, res: Response, next: NextFunction) => {
+
+    if (req.path.startsWith('/api/external')) {
+        return next();
+    }
+
     const host = req.hostname;
 
     let tenantSlug = null;
@@ -58,6 +64,7 @@ app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/tenants/:tenantId/services', serviceRoutes); // Montamos las rutas de servicio
+app.use('/api/external', externalRoutes);
 
 // Ruta de prueba
 app.get('/', (req: Request, res: Response) => {
