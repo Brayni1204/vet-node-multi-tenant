@@ -9,6 +9,8 @@ import authRoutes from './routes/authRoutes';
 import tenantRoutes from './routes/tenantRoutes';
 import serviceRoutes from './routes/serviceRoutes';
 import externalRoutes from './routes/externalRoutes';
+import appointmentRoutes from './routes/appointmentRoutes';
+import staffRoutes from './routes/staffRoutes';
 
 const app: Express = express();
 const port = process.env.PORT || 4000;
@@ -65,6 +67,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.use('/api/tenants/:tenantId/services', serviceRoutes); // Montamos las rutas de servicio
 app.use('/api/external', externalRoutes);
+app.use('/api/appointments', appointmentRoutes); // Asumiendo que esta es la ruta
+app.use('/api/tenants/:tenantId/staff', staffRoutes);
 
 // Ruta de prueba
 app.get('/', (req: Request, res: Response) => {
