@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import pool from '../db';
 import { RowDataPacket, OkPacket } from 'mysql2';
 import multer from 'multer';
@@ -9,16 +9,18 @@ import { ParamsDictionary } from 'express-serve-static-core';
 const router = Router({ mergeParams: true });
 
 // Interfaces adaptadas al nuevo esquema relacional
-interface BaseServiceParams extends ParamsDictionary {
-    tenantId: string; // El slug del inquilino (e.g., 'chavez')
-}
-
-interface ServiceItemParams extends BaseServiceParams {
+interface ServiceItemParams extends ParamsDictionary {
     serviceId: string;
 }
 
-interface ServiceRequest<P extends BaseServiceParams> extends Request<P> {
+interface ServiceRequest<P extends ParamsDictionary> extends Request<P> {
     file?: Express.Multer.File; // Propiedad para el archivo subido
+    user?: {
+        id: number;
+        tenant_id: string; // Slug (e.g., 'chavez') - Del usuario autenticado
+        role: 'admin' | 'doctor' | 'receptionist' | 'client';
+    };
+    tenantId?: string; // Slug inyectado por resolveTenant middleware (CRUCIAL)
 }
 
 // Interfaz para la tabla Images
@@ -30,7 +32,7 @@ interface ImageRow extends RowDataPacket {
     alt_text: string;
 }
 
-// 🛠️ Multer: Configuración de almacenamiento local
+// 🛠️ Multer: Configuración de almacenamiento local (No cambia)
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, 'uploads/');
@@ -42,7 +44,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-// Función auxiliar para obtener el ID numérico del inquilino (tenant) a partir del slug
+// Función auxiliar para obtener el ID numérico del inquilino (tenant) a partir del slug (No cambia)
 const getTenantNumericId = async (tenantSlug: string): Promise<number | null> => {
     const [tenantRows] = await pool.execute<RowDataPacket[]>(
         'SELECT id FROM tenants WHERE tenant_id = ?',
@@ -51,17 +53,88 @@ const getTenantNumericId = async (tenantSlug: string): Promise<number | null> =>
     return tenantRows.length > 0 ? tenantRows[0].id : null;
 };
 
-// Helper para construir la URL de visualización (duplicado en backend, pero necesario para GET)
+// Helper para construir la URL de visualización (No cambia)
 const getDisplayImageUrl = (path: string, hostname: string) => {
     if (!path) return null;
     return path.startsWith('http') ? path : `http://${hostname}:4000${path}`;
 };
 
 
-// 1. OBTENER SERVICIOS (GET /api/tenants/:tenantId/services) - Incluye filtros y todos los estados
-router.get('/', async (req: ServiceRequest<BaseServiceParams>, res: Response) => {
-    const { tenantId: tenantSlug } = req.params;
-    const { status, search } = req.query; // Query params: status=('all'|'active'|'inactive'), search=(string)
+// -----------------------------------------------------------------------------
+// 🔐 MIDDLEWARE DE AUTENTICACIÓN (Reutilizado - No cambia)
+const verifyToken = (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.split(' ')[1];
+
+    if (!token) {
+        if (req.method === 'GET' && req.route.path === '/') return next();
+        return res.status(401).json({ message: 'No autenticado. Token no proporcionado.' });
+    }
+
+    try {
+        const [tenant_slug, role] = token.split(':');
+
+        if (!tenant_slug || !['admin', 'doctor', 'receptionist', 'client'].includes(role)) {
+            return res.status(401).json({ message: 'Token de simulación no válido.' });
+        }
+
+        (req as any).user = {
+            id: 1, // Mock ID
+            tenant_id: tenant_slug,
+            role: role as any,
+        };
+
+    } catch (e) {
+        return res.status(401).json({ message: 'Token inválido o expirado.' });
+    }
+
+    next();
+};
+
+// 🛡️ MIDDLEWARE DE AUTORIZACIÓN MULTI-INQUILINO (ADAPTADO)
+const ensureTenantAccess = async (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
+    const requestedTenantSlug = req.tenantId; // Obtenido del subdominio/header
+
+    if (!requestedTenantSlug) {
+        return res.status(400).json({ message: 'El ID de inquilino (slug) no se encontró en la solicitud.' });
+    }
+
+    // Caso GET público
+    if (req.method === 'GET' && req.route.path === '/') {
+        return next();
+    }
+
+    // Caso con Token (POST/PUT/DELETE o GET con token)
+    if (!req.user) {
+        return res.status(401).json({ message: 'Se requiere autenticación para esta acción.' });
+    }
+
+    const authenticatedTenantSlug = req.user.tenant_id;
+
+    // Comprobación de que el usuario autenticado pertenece al inquilino solicitado
+    if (authenticatedTenantSlug !== requestedTenantSlug) {
+        return res.status(403).json({
+            message: 'Acceso denegado. No tiene permisos para acceder a los recursos de este inquilino.'
+        });
+    }
+
+    next();
+};
+
+// 🧑‍💻 MIDDLEWARE DE AUTORIZACIÓN DE ROL (No cambia)
+const isAllowedToManageServices = (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
+    if (req.user?.role !== 'admin') {
+        return res.status(403).json({ message: 'Acceso denegado. Solo administradores pueden gestionar servicios.' });
+    }
+    next();
+};
+// -----------------------------------------------------------------------------
+
+
+// 1. OBTENER SERVICIOS (GET /api/services)
+router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Response) => {
+    const tenantSlug = req.tenantId!; // Obtenido del subdominio/header
+    const { status, search } = req.query;
 
     try {
         const tenantNumericId = await getTenantNumericId(tenantSlug);
@@ -81,14 +154,18 @@ router.get('/', async (req: ServiceRequest<BaseServiceParams>, res: Response) =>
         `;
         const queryParams: (string | number | boolean)[] = [tenantNumericId];
 
-        // Aplicar filtro de estado
-        if (status === 'active') {
+        const isAdmin = req.user?.role === 'admin';
+
+        if (isAdmin) {
+            if (status === 'active') {
+                query += ' AND s.is_active = TRUE';
+            } else if (status === 'inactive') {
+                query += ' AND s.is_active = FALSE';
+            }
+        } else {
             query += ' AND s.is_active = TRUE';
-        } else if (status === 'inactive') {
-            query += ' AND s.is_active = FALSE';
         }
 
-        // Aplicar filtro de búsqueda
         if (search) {
             query += ' AND (s.title LIKE ? OR s.description LIKE ?)';
             queryParams.push(`%${search}%`);
@@ -119,9 +196,9 @@ router.get('/', async (req: ServiceRequest<BaseServiceParams>, res: Response) =>
 });
 
 
-// 2. CREAR UN NUEVO SERVICIO (POST /api/tenants/:tenantId/services)
-router.post('/', upload.single('image'), async (req: ServiceRequest<BaseServiceParams>, res: Response) => {
-    const { tenantId: tenantSlug } = req.params;
+// 2. CREAR UN NUEVO SERVICIO (POST /api/services)
+router.post('/', verifyToken, ensureTenantAccess, isAllowedToManageServices, upload.single('image'), async (req: ServiceRequest<any>, res: Response) => {
+    const tenantSlug = req.tenantId!;
     const { title, description } = req.body;
     const file = req.file;
 
@@ -141,14 +218,12 @@ router.post('/', upload.single('image'), async (req: ServiceRequest<BaseServiceP
 
         await connection.beginTransaction();
 
-        // 🎯 is_active por defecto es TRUE en la tabla services
         const [serviceResult] = await connection.execute<OkPacket>(
             'INSERT INTO services (tenant_id, title, description) VALUES (?, ?, ?)',
             [tenantNumericId, title, description]
         );
         const serviceId = serviceResult.insertId;
 
-        // Insertar metadatos de la imagen
         const imageUrl = `/uploads/${file.filename}`;
         const storageKey = file.filename;
 
@@ -158,7 +233,6 @@ router.post('/', upload.single('image'), async (req: ServiceRequest<BaseServiceP
         );
         const imageId = imageResult.insertId;
 
-        // Relacionar la imagen con el servicio (como imagen principal)
         await connection.execute(
             'INSERT INTO service_images (service_id, image_id, is_primary, sort_order) VALUES (?, ?, TRUE, 0)',
             [serviceId, imageId]
@@ -182,9 +256,10 @@ router.post('/', upload.single('image'), async (req: ServiceRequest<BaseServiceP
     }
 });
 
-// 3. ACTUALIZAR UN SERVICIO (PUT /api/tenants/:tenantId/services/:serviceId)
-router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
-    const { tenantId: tenantSlug, serviceId } = req.params;
+// 3. ACTUALIZAR UN SERVICIO (PUT /api/services/:serviceId)
+router.put('/:serviceId', verifyToken, ensureTenantAccess, isAllowedToManageServices, upload.single('image'), async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
+    const tenantSlug = req.tenantId!;
+    const { serviceId } = req.params;
     const { title, description } = req.body;
     const file = req.file;
 
@@ -205,16 +280,13 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
 
         await connection.beginTransaction();
 
-        // 3a. Actualizar el servicio (título y descripción)
         const [updateServiceResult] = await connection.execute<OkPacket>(
             'UPDATE services SET title = ?, description = ? WHERE id = ? AND tenant_id = ?',
             [title, description, serviceId, tenantNumericId]
         );
 
-        // 3b. Manejar la actualización de la imagen (Solo si se subió un nuevo archivo)
         let finalImageUrl = null;
         if (file) {
-            // 1. Buscamos la imagen principal actual
             const [currentImageRows] = await connection.execute<ImageRow[]>(
                 `SELECT i.id, i.storage_key FROM images i
                  JOIN service_images si ON i.id = si.image_id
@@ -225,10 +297,9 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
             const storageKey = file.filename;
             const newImageUrl = `/uploads/${file.filename}`;
             let imageId;
-            finalImageUrl = newImageUrl; // Usaremos esta URL para la respuesta final
+            finalImageUrl = newImageUrl;
 
             if (currentImageRows.length > 0) {
-                // Actualizamos la imagen existente
                 const currentImage = currentImageRows[0];
                 imageId = currentImage.id;
 
@@ -237,7 +308,6 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
                     [storageKey, newImageUrl, title, imageId]
                 );
 
-                // Eliminamos el archivo antiguo del disco
                 try {
                     const oldFilePath = path.join('uploads', currentImage.storage_key);
                     if (fs.existsSync(oldFilePath)) {
@@ -248,7 +318,6 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
                 }
 
             } else {
-                // No existe imagen principal: la creamos y la enlazamos
                 const [imageResult] = await connection.execute<OkPacket>(
                     'INSERT INTO images (tenant_id, storage_key, url, alt_text) VALUES (?, ?, ?, ?)',
                     [tenantNumericId, storageKey, newImageUrl, title]
@@ -275,7 +344,6 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
 
         await connection.commit();
 
-        // Si no se subió archivo nuevo, debemos obtener la URL de la imagen existente para la respuesta del front
         if (!finalImageUrl) {
             const [imageRow] = await connection.execute<ImageRow[]>(
                 `SELECT i.url FROM images i 
@@ -289,7 +357,7 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
 
         res.status(200).json({
             message: 'Servicio actualizado exitosamente!',
-            imageUrl: finalImageUrl ? `http://${req.hostname}:4000${finalImageUrl}` : null
+            imageUrl: finalImageUrl ? getDisplayImageUrl(finalImageUrl, req.hostname) : null
         });
 
     } catch (error) {
@@ -302,9 +370,10 @@ router.put('/:serviceId', upload.single('image'), async (req: ServiceRequest<Ser
     }
 });
 
-// 🎯 4. RUTA PARA DESACTIVAR SERVICIO (PUT /api/tenants/:tenantId/services/:serviceId/deactivate)
-router.put('/:serviceId/deactivate', async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
-    const { tenantId: tenantSlug, serviceId } = req.params;
+// 🎯 4. RUTA PARA DESACTIVAR SERVICIO (PUT /api/services/:serviceId/deactivate)
+router.put('/:serviceId/deactivate', verifyToken, ensureTenantAccess, isAllowedToManageServices, async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
+    const tenantSlug = req.tenantId!;
+    const { serviceId } = req.params;
 
     try {
         const tenantNumericId = await getTenantNumericId(tenantSlug);
@@ -325,15 +394,15 @@ router.put('/:serviceId/deactivate', async (req: ServiceRequest<ServiceItemParam
     }
 });
 
-// 🆕 5. RUTA PARA ACTIVAR SERVICIO (PUT /api/tenants/:tenantId/services/:serviceId/activate)
-router.put('/:serviceId/activate', async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
-    const { tenantId: tenantSlug, serviceId } = req.params;
+// 🆕 5. RUTA PARA ACTIVAR SERVICIO (PUT /api/services/:serviceId/activate)
+router.put('/:serviceId/activate', verifyToken, ensureTenantAccess, isAllowedToManageServices, async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
+    const tenantSlug = req.tenantId!;
+    const { serviceId } = req.params;
 
     try {
         const tenantNumericId = await getTenantNumericId(tenantSlug);
         if (tenantNumericId === null) return res.status(404).json({ message: `Inquilino con ID ${tenantSlug} no encontrado.` });
 
-        // 🎯 ACCIÓN: Realiza ACTIVACIÓN (actualiza is_active = TRUE)
         const [result] = await pool.execute<OkPacket>(
             'UPDATE services SET is_active = TRUE WHERE id = ? AND tenant_id = ?',
             [serviceId, tenantNumericId]

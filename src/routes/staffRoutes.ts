@@ -1,17 +1,17 @@
-// src/routes/staffRoutes.ts (Implementación final)
+// src/routes/staffRoutes.ts (Implementación multi-inquilino corregida para subdominio)
 import { Router, Request, Response, NextFunction } from 'express';
 import pool from '../db';
 import bcrypt from 'bcryptjs';
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
 import { ParamsDictionary } from 'express-serve-static-core';
 
-// Router con mergeParams: true, necesario para leer :tenantId del path
+// Router con mergeParams: true (mantenemos por si las subrutas necesitan params)
 const router = Router({ mergeParams: true });
 
 // Interfaces adaptadas para el StaffRouter
 interface StaffRouteParams extends ParamsDictionary {
-    // ⚠️ CRUCIAL: Este ID es el ID numérico del tenant (e.g., 1, 2, 3)
-    tenantId: string;
+    // Solo usamos staffId aquí, ya que el tenantId viene del subdominio
+    staffId: string;
 }
 
 interface StaffRow extends RowDataPacket {
@@ -27,78 +27,117 @@ interface StaffRow extends RowDataPacket {
 interface StaffRequest extends Request<StaffRouteParams> {
     user?: {
         id: number;
-        tenant_id: string; // Slug (e.g., 'chavez')
+        tenant_id: string; // Slug (e.g., 'chavez') - Del usuario autenticado
         role: 'admin' | 'doctor' | 'receptionist' | 'client';
     };
-    tenantId?: string; // Slug inyectado por resolveTenant middleware (usado para authRoutes)
+    tenantId?: string; // Slug inyectado por resolveTenant middleware (CRUCIAL)
+    // Nuevo: El tenant resuelto a partir del SLUG
+    resolvedTenant?: {
+        id: number; // El ID numérico del tenant solicitado
+        slug: string; // El slug del tenant solicitado
+    }
 }
 
-// ⚠️ PLACEHOLDER DE MIDDLEWARE DE AUTENTICACIÓN Y AUTORIZACIÓN ⚠️
-// Simulamos la inyección de req.user y verificación básica de token
-const verifyToken = (req: StaffRequest, res: Response, next: NextFunction) => {
-    const token = req.headers.authorization?.split(' ')[1];
-
-    // Simulación: Asumimos que el usuario es un administrador del tenant 'chavez'
-    // En un sistema real, esto se obtendría del JWT.
-    (req as any).user = {
-        id: 1,
-        tenant_id: 'chavez',
-        role: 'admin',
-    };
-
-    if (!token || !req.user || req.user.role === 'client') {
-        return res.status(401).json({ message: 'No autenticado o acceso insuficiente.' });
-    }
-
-    next();
-};
-
-const isAllowedToManageStaff = (req: StaffRequest, res: Response, next: NextFunction) => {
-    // Solo el administrador (rol 'admin') tiene permiso para crear/listar/editar personal
-    if (req.user?.role !== 'admin') {
-        return res.status(403).json({ message: 'Acceso denegado. Solo administradores pueden gestionar personal.' });
-    }
-    next();
-};
-
-
-// 🎯 FUNCIÓN AUXILIAR (Ajustada para usar el ID numérico directamente)
-// Como ServicesAdmin.tsx y StaffAdmin.tsx están enviando el ID numérico directamente en el path,
-// el router solo necesita obtener el slug (tenant_id) para devolverlo al frontend.
-const getTenantInfoById = async (tenantNumericId: string): Promise<{ id: number; slug: string } | null> => {
+// 🎯 FUNCIÓN AUXILIAR - Obtiene ID y Slug por SLUG
+const getTenantInfoBySlug = async (tenantSlug: string): Promise<{ id: number; slug: string } | null> => {
     const [tenantRows] = await pool.execute<RowDataPacket[]>(
-        'SELECT id, tenant_id FROM tenants WHERE id = ?',
-        [tenantNumericId]
+        'SELECT id, tenant_id FROM tenants WHERE tenant_id = ?',
+        [tenantSlug]
     );
     if (tenantRows.length === 0) return null;
     return { id: tenantRows[0].id, slug: tenantRows[0].tenant_id };
 };
 
 
-// 🎯 1. RUTA GET para obtener la lista de personal
-router.get('/', verifyToken, async (req: StaffRequest, res: Response) => {
-    // ⚠️ Usamos req.params.tenantId, que el frontend ha enviado como ID numérico.
-    const tenantIdNumeric = req.params.tenantId;
+// -----------------------------------------------------------------------------
+// 🔐 MIDDLEWARE DE AUTENTICACIÓN (Simulación dinámica de JWT - NO CAMBIA)
+const verifyToken = (req: StaffRequest, res: Response, next: NextFunction) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.split(' ')[1];
+
+    if (!token) {
+        return res.status(401).json({ message: 'No autenticado. Token no proporcionado.' });
+    }
 
     try {
-        const tenantInfo = await getTenantInfoById(tenantIdNumeric);
-        if (tenantInfo === null) {
-            return res.status(404).json({ message: `Inquilino con ID ${tenantIdNumeric} no encontrado.` });
+        const [tenant_slug, role] = token.split(':');
+
+        if (!tenant_slug || !['admin', 'doctor', 'receptionist', 'client'].includes(role)) {
+            return res.status(401).json({ message: 'Token de simulación no válido.' });
         }
 
-        // Obtenemos solo el personal del tenant (la tabla clients se gestiona aparte)
+        (req as any).user = {
+            id: 1, // Mock ID
+            tenant_id: tenant_slug, // El tenant_id (slug) del usuario autenticado
+            role: role as any,
+        };
+
+        if (req.user?.role === 'client') {
+            return res.status(403).json({ message: 'Acceso denegado. Los clientes no pueden acceder a la gestión de personal.' });
+        }
+
+    } catch (e) {
+        return res.status(401).json({ message: 'Token inválido o expirado.' });
+    }
+
+    next();
+};
+
+// 🛡️ MIDDLEWARE DE AUTORIZACIÓN MULTI-INQUILINO (ADAPTADO)
+const ensureTenantAccess = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    const requestedTenantSlug = req.tenantId; // Obtenido del subdominio/header
+    const authenticatedTenantSlug = req.user?.tenant_id;
+
+    if (!requestedTenantSlug) {
+        return res.status(400).json({ message: 'El ID de inquilino (slug) no se encontró en la solicitud.' });
+    }
+
+    // 1. Obtener información del inquilino solicitado a partir del SLUG
+    const tenantInfo = await getTenantInfoBySlug(requestedTenantSlug);
+
+    if (tenantInfo === null) {
+        return res.status(404).json({ message: `Inquilino con ID ${requestedTenantSlug} no encontrado.` });
+    }
+
+    req.resolvedTenant = tenantInfo; // Almacenamos la info resuelta
+
+    // 2. Comprobación de que el usuario autenticado pertenece al inquilino solicitado
+    if (!req.user || authenticatedTenantSlug !== requestedTenantSlug) {
+        return res.status(403).json({
+            message: 'Acceso denegado. No tiene permisos para acceder a los recursos de este inquilino.'
+        });
+    }
+
+    next();
+};
+
+// 🧑‍💻 MIDDLEWARE DE AUTORIZACIÓN DE ROL (NO CAMBIA)
+const isAllowedToManageStaff = (req: StaffRequest, res: Response, next: NextFunction) => {
+    if (req.user?.role !== 'admin') {
+        return res.status(403).json({ message: 'Acceso denegado. Solo administradores pueden gestionar personal.' });
+    }
+    next();
+};
+// -----------------------------------------------------------------------------
+
+// 🎯 1. RUTA GET para obtener la lista de personal
+router.get('/', verifyToken, ensureTenantAccess, async (req: StaffRequest, res: Response) => {
+    // Usamos el ID numérico y el slug resueltos
+    const { id: tenantDbId, slug: tenantSlug } = req.resolvedTenant!;
+
+    try {
         const [staff] = await pool.execute<StaffRow[]>(
             `SELECT id, email, name, is_admin, role 
              FROM staff 
              WHERE tenant_id = ?`,
-            [tenantInfo.id] // Buscar por ID numérico en la DB
+            [tenantDbId] // Buscar por ID numérico en la DB
         );
 
         res.status(200).json({
             message: 'Lista de personal obtenida exitosamente',
             users: staff.map(s => ({
                 id: s.id,
-                tenant_id: tenantInfo.slug, // Devolvemos el slug
+                tenant_id: tenantSlug, // Devolvemos el slug
                 email: s.email,
                 name: s.name,
                 is_admin: s.is_admin,
@@ -113,12 +152,12 @@ router.get('/', verifyToken, async (req: StaffRequest, res: Response) => {
 });
 
 // 🎯 2. RUTA POST para crear nuevo personal (Doctor/Recepcionista/Admin)
-router.post('/', verifyToken, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
+router.post('/', verifyToken, ensureTenantAccess, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
     const { email, password, name, role }: any = req.body;
-    // ⚠️ Obtenemos el ID numérico del parámetro de ruta
-    const tenantIdNumeric = req.params.tenantId;
+    // Usamos el tenant resuelto
+    const { id: tenantDbId, slug: tenantSlug } = req.resolvedTenant!;
 
-    if (!tenantIdNumeric || !email || !password || !name || !role) {
+    if (!email || !password || !name || !role) {
         return res.status(400).json({ message: 'Faltan campos obligatorios.' });
     }
     if (!['doctor', 'receptionist', 'admin'].includes(role)) {
@@ -128,12 +167,6 @@ router.post('/', verifyToken, isAllowedToManageStaff, async (req: StaffRequest, 
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
-
-        const tenantInfo = await getTenantInfoById(tenantIdNumeric);
-        if (tenantInfo === null) {
-            await connection.rollback();
-            return res.status(404).json({ message: `Tenant con ID ${tenantIdNumeric} no encontrado.` });
-        }
 
         // 1. Verificar si el email ya existe en la tabla `staff` o `clients`
         const [existingStaff] = await connection.execute<RowDataPacket[]>(
@@ -159,7 +192,7 @@ router.post('/', verifyToken, isAllowedToManageStaff, async (req: StaffRequest, 
         const [userResult] = await connection.execute<ResultSetHeader>(
             `INSERT INTO staff (tenant_id, email, password, name, is_admin, role)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [tenantInfo.id, email, hashedPassword, name, is_admin, role]
+            [tenantDbId, email, hashedPassword, name, is_admin, role]
         );
 
         await connection.commit();
@@ -172,7 +205,7 @@ router.post('/', verifyToken, isAllowedToManageStaff, async (req: StaffRequest, 
                 name,
                 role,
                 is_admin,
-                tenant_id: tenantInfo.slug
+                tenant_id: tenantSlug
             }
         });
 
@@ -185,16 +218,16 @@ router.post('/', verifyToken, isAllowedToManageStaff, async (req: StaffRequest, 
     }
 });
 
-// 🎯 Agrega aquí las rutas PUT para edición y DELETE para eliminación si las necesitas
-// Ejemplo de DELETE (simulando):
-router.delete('/:staffId', verifyToken, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
-    const tenantIdNumeric = req.params.tenantId;
+// 🎯 RUTA DELETE para eliminación
+router.delete('/:staffId', verifyToken, ensureTenantAccess, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
+    // Usamos el ID numérico del tenant resuelto para la consulta
+    const { id: tenantDbId } = req.resolvedTenant!;
     const staffId = req.params.staffId;
 
     try {
         const [result] = await pool.execute<ResultSetHeader>(
             'DELETE FROM staff WHERE id = ? AND tenant_id = ?',
-            [staffId, tenantIdNumeric]
+            [staffId, tenantDbId] // Se asegura que el staff a eliminar pertenece al tenant de la URL
         );
 
         if (result.affectedRows === 0) {

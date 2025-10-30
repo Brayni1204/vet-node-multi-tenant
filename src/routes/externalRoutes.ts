@@ -6,6 +6,16 @@ import { RowDataPacket, ResultSetHeader } from 'mysql2';
 
 const router = Router();
 
+// Interfaces para mayor claridad
+interface RegisterTenantRequest extends Request {
+    body: {
+        tenant_id: string; // Slug (e.g., 'chavez')
+        name: string;
+        email: string;
+        password?: string;
+    }
+}
+
 // Middleware de autenticación para la API externa
 const authenticateExternalApi = (req: Request, res: Response, next: NextFunction) => {
     const externalToken = req.headers['x-external-api-token'];
@@ -25,10 +35,10 @@ const authenticateExternalApi = (req: Request, res: Response, next: NextFunction
 
 // 🎯 RUTA POST para registrar un nuevo inquilino y un usuario administrador
 // Endpoint: POST /api/external/register-tenant
-router.post('/register-tenant', authenticateExternalApi, async (req: Request, res: Response) => {
-    const { tenant_id, name, email, password }: any = req.body;
+router.post('/register-tenant', authenticateExternalApi, async (req: RegisterTenantRequest, res: Response) => {
+    const { tenant_id, name, email, password } = req.body;
 
-    // 1. Validación de campos obligatorios (Sin cambios)
+    // 1. Validación de campos obligatorios
     if (!tenant_id || !name || !email || !password) {
         return res.status(400).json({ message: 'Faltan campos obligatorios: tenant_id, name, email, password.' });
     }
@@ -40,7 +50,7 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
     try {
         await connection.beginTransaction();
 
-        // 2. Verificar si el tenant_id ya existe (Sin cambios)
+        // 2. Verificar si el tenant_id ya existe
         const [existingTenant] = await connection.execute<RowDataPacket[]>(
             'SELECT id FROM tenants WHERE tenant_id = ?',
             [tenant_id]
@@ -50,13 +60,11 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
             return res.status(409).json({ message: `El ID de inquilino '${tenant_id}' ya está en uso.` });
         }
 
-        // 3. Verificar si el email ya existe en la nueva tabla `staff`
-        // ⚠️ Cambiado de 'users' a 'staff'
+        // 3. Verificar si el email ya existe en la tabla `staff` o `clients`
         const [existingStaff] = await connection.execute<RowDataPacket[]>(
             'SELECT id FROM staff WHERE email = ?',
             [email]
         );
-        // Opcional: También verificamos la tabla `clients` para evitar colisiones de email global
         const [existingClient] = await connection.execute<RowDataPacket[]>(
             'SELECT id FROM clients WHERE email = ?',
             [email]
@@ -64,16 +72,15 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
 
         if (existingStaff.length > 0 || existingClient.length > 0) {
             await connection.rollback();
-            // Mensaje genérico para no revelar la estructura interna
             return res.status(409).json({ message: `El email de usuario '${email}' ya está registrado.` });
         }
 
-        // 4. Cifrar la contraseña (Sin cambios)
+        // 4. Cifrar la contraseña
         const saltRounds = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) : 10;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-        // 5. Datos por defecto / aleatorios (Sin cambios)
-        const defaultLogoUrl = process.env.DEFAULT_LOGO_URL || '/uploads/default-logo.png';
+        // 5. Datos por defecto / aleatorios
+        const defaultLogoUrl = process.env.DEFAULT_LOGO_URL || '/uploads/icono.png';
         const defaultData = {
             phone: 'N/A',
             address: 'Dirección por definir',
@@ -83,7 +90,7 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
             secondary_color: '#6c757d',
         };
 
-        // 6. Insertar el nuevo inquilino (Sin cambios)
+        // 6. Insertar el nuevo inquilino
         const [tenantResult] = await connection.execute<ResultSetHeader>(
             `INSERT INTO tenants (tenant_id, name, phone, email, address, schedule, logo_url, primary_color, secondary_color)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -102,7 +109,6 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
         const tenantId = tenantResult.insertId;
 
         // 7. Crear el usuario administrador
-        // ⚠️ Insertamos en la tabla `staff` y añadimos el campo `role`
         const [userResult] = await connection.execute<ResultSetHeader>(
             `INSERT INTO staff (tenant_id, email, password, name, is_admin, role)
              VALUES (?, ?, ?, ?, ?, ?)`,
@@ -112,11 +118,11 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
                 hashedPassword,
                 name,
                 true,     // is_admin: true
-                'admin',  // 🆕 Rol de administrador
+                'admin',  // Rol de administrador
             ]
         );
 
-        // 8. Commit de la transacción (Sin cambios)
+        // 8. Commit de la transacción
         await connection.commit();
         const productionUrl = `${tenant_id}.${PROD_DOMAIN_BASE}`;
         const localUrl = `http://${tenant_id}.${LOCAL_DOMAIN_HOST}/`;
@@ -135,7 +141,7 @@ router.post('/register-tenant', authenticateExternalApi, async (req: Request, re
                 email: email,
                 name: name,
                 is_admin: true,
-                role: 'admin', // 🆕 Incluimos el rol
+                role: 'admin',
             },
             access: {
                 productionUrl: productionUrl,

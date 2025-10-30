@@ -15,7 +15,7 @@ import staffRoutes from './routes/staffRoutes';
 const app: Express = express();
 const port = process.env.PORT || 4000;
 
-// Middleware para resolver el tenantId del subdominio
+// Middleware para resolver el tenantId del subdominio (NO CAMBIA)
 const resolveTenant = (req: Request, res: Response, next: NextFunction) => {
 
     if (req.path.startsWith('/api/external')) {
@@ -40,35 +40,28 @@ const resolveTenant = (req: Request, res: Response, next: NextFunction) => {
 
 app.use(cors({
     origin: (origin, callback) => {
-        // Permitir solicitudes sin origen (curl, postman, etc.)
         if (!origin) return callback(null, true);
-
-        // Permitir el origen del frontend (puerto 5173) y el backend (puerto 4000)
         if (origin.endsWith(':5173') || origin.endsWith(':4000')) {
             return callback(null, true);
         }
-
         return callback(new Error('Not allowed by CORS'), false);
     },
     credentials: true,
 }));
 
-// Usamos los parsers de body de Express (Multer se encarga de multipart, por lo que JSON y URL-encoded son seguros)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(resolveTenant);
 
-// 🎯 CRUCIAL: Configuración para servir archivos estáticos (subidos).
-// Mapeamos la URL /uploads al directorio 'uploads' en el sistema de archivos.
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
-// Rutas de API
+// Rutas de API - Rutas montadas de forma simplificada
 app.use('/api/auth', authRoutes);
-app.use('/api/tenants', tenantRoutes);
-app.use('/api/tenants/:tenantId/services', serviceRoutes); // Montamos las rutas de servicio
+app.use('/api/tenants', tenantRoutes); // Maneja /profile y /:tenantId
+app.use('/api/services', serviceRoutes); // Montado en /api/services
 app.use('/api/external', externalRoutes);
-app.use('/api/appointments', appointmentRoutes); // Asumiendo que esta es la ruta
-app.use('/api/tenants/:tenantId/staff', staffRoutes);
+app.use('/api/appointments', appointmentRoutes); // Montado en /api/appointments
+app.use('/api/staff', staffRoutes); // Montado en /api/staff
 
 // Ruta de prueba
 app.get('/', (req: Request, res: Response) => {
