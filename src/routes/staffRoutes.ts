@@ -218,6 +218,80 @@ router.post('/', verifyToken, ensureTenantAccess, isAllowedToManageStaff, async 
     }
 });
 
+// 🎯 3. RUTA PUT para edición (PUT /api/staff/:staffId) - Corrección al problema de la consulta
+router.put('/:staffId', verifyToken, ensureTenantAccess, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
+    const { staffId } = req.params;
+    const { name, role, password }: any = req.body;
+    const { id: tenantDbId } = req.resolvedTenant!;
+
+    if (!name || !role) {
+        return res.status(400).json({ message: 'Faltan campos obligatorios: nombre y rol.' });
+    }
+    if (!['doctor', 'receptionist', 'admin'].includes(role)) {
+        return res.status(400).json({ message: 'Rol de personal no válido.' });
+    }
+
+    const is_admin = (role === 'admin');
+    const updateFields: string[] = ['name = ?', 'role = ?', 'is_admin = ?'];
+    const updateValues: (string | number | boolean)[] = [name, role, is_admin];
+
+    // Si se proporciona una nueva contraseña, la hasheamos y la incluimos
+    if (password) {
+        const saltRounds = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) : 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+        updateFields.push('password = ?');
+        updateValues.push(hashedPassword);
+    }
+
+    // Añadir el filtro WHERE al final: ID del staff y ID numérico del tenant
+    updateValues.push(staffId);
+    updateValues.push(tenantDbId);
+
+    const updateQuery = `UPDATE staff SET ${updateFields.join(', ')} WHERE id = ? AND tenant_id = ?`;
+
+    try {
+        const [result] = await pool.execute<ResultSetHeader>(
+            updateQuery,
+            updateValues
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: `Personal con ID ${staffId} no encontrado en este inquilino.` });
+        }
+
+        res.status(200).json({ message: 'Personal actualizado exitosamente.' });
+    } catch (error) {
+        console.error("Error al actualizar personal:", error);
+        res.status(500).json({ message: 'Error del servidor al actualizar personal.' });
+    }
+});
+
+
+// 🎯 4. RUTA DELETE para eliminación (DELETE /api/staff/:staffId)
+router.delete('/:staffId', verifyToken, ensureTenantAccess, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
+    const staffId = req.params.staffId;
+    // 🔑 Usamos el ID numérico del tenant resuelto para la consulta
+    const { id: tenantDbId } = req.resolvedTenant!;
+
+    try {
+        const [result] = await pool.execute<ResultSetHeader>(
+            'DELETE FROM staff WHERE id = ? AND tenant_id = ?',
+            [staffId, tenantDbId] // Se asegura que el staff a eliminar pertenece al tenant del host
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: `Personal con ID ${staffId} no encontrado en este inquilino.` });
+        }
+
+        res.status(200).json({ message: 'Personal eliminado exitosamente.' });
+    } catch (error) {
+        console.error("Error al eliminar personal:", error);
+        res.status(500).json({ message: 'Error del servidor al eliminar personal.' });
+    }
+});
+
+
+
 // 🎯 RUTA DELETE para eliminación
 router.delete('/:staffId', verifyToken, ensureTenantAccess, isAllowedToManageStaff, async (req: StaffRequest, res: Response) => {
     // Usamos el ID numérico del tenant resuelto para la consulta

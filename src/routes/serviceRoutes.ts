@@ -1,3 +1,4 @@
+// src/routes/serviceRoutes.ts
 import { Router, Request, Response, NextFunction } from 'express';
 import pool from '../db';
 import { RowDataPacket, OkPacket } from 'mysql2';
@@ -8,22 +9,21 @@ import { ParamsDictionary } from 'express-serve-static-core';
 
 const router = Router({ mergeParams: true });
 
-// Interfaces adaptadas al nuevo esquema relacional
+// --- INTERFACES (Sin cambios) ---
 interface ServiceItemParams extends ParamsDictionary {
     serviceId: string;
 }
 
 interface ServiceRequest<P extends ParamsDictionary> extends Request<P> {
-    file?: Express.Multer.File; // Propiedad para el archivo subido
+    file?: Express.Multer.File;
     user?: {
         id: number;
-        tenant_id: string; // Slug (e.g., 'chavez') - Del usuario autenticado
+        tenant_id: string;
         role: 'admin' | 'doctor' | 'receptionist' | 'client';
     };
-    tenantId?: string; // Slug inyectado por resolveTenant middleware (CRUCIAL)
+    tenantId?: string;
 }
 
-// Interfaz para la tabla Images
 interface ImageRow extends RowDataPacket {
     id: number;
     tenant_id: number;
@@ -32,7 +32,7 @@ interface ImageRow extends RowDataPacket {
     alt_text: string;
 }
 
-// 🛠️ Multer: Configuración de almacenamiento local (No cambia)
+// --- HELPERS Y CONFIGURACIÓN (Sin cambios) ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, 'uploads/');
@@ -41,10 +41,8 @@ const storage = multer.diskStorage({
         cb(null, Date.now() + '-' + file.originalname);
     }
 });
-
 const upload = multer({ storage: storage });
 
-// Función auxiliar para obtener el ID numérico del inquilino (tenant) a partir del slug (No cambia)
 const getTenantNumericId = async (tenantSlug: string): Promise<number | null> => {
     const [tenantRows] = await pool.execute<RowDataPacket[]>(
         'SELECT id FROM tenants WHERE tenant_id = ?',
@@ -53,15 +51,13 @@ const getTenantNumericId = async (tenantSlug: string): Promise<number | null> =>
     return tenantRows.length > 0 ? tenantRows[0].id : null;
 };
 
-// Helper para construir la URL de visualización (No cambia)
 const getDisplayImageUrl = (path: string, hostname: string) => {
     if (!path) return null;
     return path.startsWith('http') ? path : `http://${hostname}:4000${path}`;
 };
 
 
-// -----------------------------------------------------------------------------
-// 🔐 MIDDLEWARE DE AUTENTICACIÓN (Reutilizado - No cambia)
+// --- MIDDLEWARES (Sin cambios) ---
 const verifyToken = (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
     const token = authHeader?.split(' ')[1];
@@ -91,27 +87,23 @@ const verifyToken = (req: ServiceRequest<any>, res: Response, next: NextFunction
     next();
 };
 
-// 🛡️ MIDDLEWARE DE AUTORIZACIÓN MULTI-INQUILINO (ADAPTADO)
 const ensureTenantAccess = async (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
-    const requestedTenantSlug = req.tenantId; // Obtenido del subdominio/header
+    const requestedTenantSlug = req.tenantId;
 
     if (!requestedTenantSlug) {
         return res.status(400).json({ message: 'El ID de inquilino (slug) no se encontró en la solicitud.' });
     }
 
-    // Caso GET público
     if (req.method === 'GET' && req.route.path === '/') {
         return next();
     }
 
-    // Caso con Token (POST/PUT/DELETE o GET con token)
     if (!req.user) {
         return res.status(401).json({ message: 'Se requiere autenticación para esta acción.' });
     }
 
     const authenticatedTenantSlug = req.user.tenant_id;
 
-    // Comprobación de que el usuario autenticado pertenece al inquilino solicitado
     if (authenticatedTenantSlug !== requestedTenantSlug) {
         return res.status(403).json({
             message: 'Acceso denegado. No tiene permisos para acceder a los recursos de este inquilino.'
@@ -121,7 +113,6 @@ const ensureTenantAccess = async (req: ServiceRequest<any>, res: Response, next:
     next();
 };
 
-// 🧑‍💻 MIDDLEWARE DE AUTORIZACIÓN DE ROL (No cambia)
 const isAllowedToManageServices = (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
     if (req.user?.role !== 'admin') {
         return res.status(403).json({ message: 'Acceso denegado. Solo administradores pueden gestionar servicios.' });
@@ -133,7 +124,7 @@ const isAllowedToManageServices = (req: ServiceRequest<any>, res: Response, next
 
 // 1. OBTENER SERVICIOS (GET /api/services)
 router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Response) => {
-    const tenantSlug = req.tenantId!; // Obtenido del subdominio/header
+    const tenantSlug = req.tenantId!;
     const { status, search } = req.query;
 
     try {
@@ -147,22 +138,26 @@ router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Respon
             SELECT 
                 s.id, s.title, s.description, s.is_active, 
                 i.url AS image
-             FROM services s
-             LEFT JOIN service_images si ON s.id = si.service_id AND si.is_primary = TRUE
-             LEFT JOIN images i ON si.image_id = i.id
-             WHERE s.tenant_id = ?
+            FROM services s
+            LEFT JOIN service_images si ON s.id = si.service_id AND si.is_primary = TRUE
+            LEFT JOIN images i ON si.image_id = i.id
+            WHERE s.tenant_id = ?
         `;
         const queryParams: (string | number | boolean)[] = [tenantNumericId];
 
         const isAdmin = req.user?.role === 'admin';
 
+        // 🚨 LÓGICA DE FILTRADO CORREGIDA 🚨
         if (isAdmin) {
+            // Caso Admin: Aplicamos filtro SOLO si el estado es 'active' o 'inactive'
             if (status === 'active') {
                 query += ' AND s.is_active = TRUE';
             } else if (status === 'inactive') {
                 query += ' AND s.is_active = FALSE';
             }
+            // Si status es 'all', NO añadimos condición, devolviendo todos.
         } else {
+            // Caso Público/No-Admin: Siempre forzamos a mostrar solo los activos
             query += ' AND s.is_active = TRUE';
         }
 
@@ -180,6 +175,7 @@ router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Respon
             id: row.id,
             title: row.title,
             description: row.description,
+            // Convertimos TINYINT(1) o BOOLEAN de MySQL a booleano de JavaScript
             is_active: row.is_active === 1,
             image: row.image ? getDisplayImageUrl(row.image, req.hostname) : null
         }));
@@ -196,7 +192,7 @@ router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Respon
 });
 
 
-// 2. CREAR UN NUEVO SERVICIO (POST /api/services)
+// 2. CREAR UN NUEVO SERVICIO (POST /api/services) (Sin cambios)
 router.post('/', verifyToken, ensureTenantAccess, isAllowedToManageServices, upload.single('image'), async (req: ServiceRequest<any>, res: Response) => {
     const tenantSlug = req.tenantId!;
     const { title, description } = req.body;
@@ -256,7 +252,7 @@ router.post('/', verifyToken, ensureTenantAccess, isAllowedToManageServices, upl
     }
 });
 
-// 3. ACTUALIZAR UN SERVICIO (PUT /api/services/:serviceId)
+// 3. ACTUALIZAR UN SERVICIO (PUT /api/services/:serviceId) (Sin cambios)
 router.put('/:serviceId', verifyToken, ensureTenantAccess, isAllowedToManageServices, upload.single('image'), async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
     const tenantSlug = req.tenantId!;
     const { serviceId } = req.params;
@@ -370,7 +366,7 @@ router.put('/:serviceId', verifyToken, ensureTenantAccess, isAllowedToManageServ
     }
 });
 
-// 🎯 4. RUTA PARA DESACTIVAR SERVICIO (PUT /api/services/:serviceId/deactivate)
+// 4. RUTA PARA DESACTIVAR SERVICIO (PUT /api/services/:serviceId/deactivate) (Sin cambios)
 router.put('/:serviceId/deactivate', verifyToken, ensureTenantAccess, isAllowedToManageServices, async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
     const tenantSlug = req.tenantId!;
     const { serviceId } = req.params;
@@ -394,7 +390,7 @@ router.put('/:serviceId/deactivate', verifyToken, ensureTenantAccess, isAllowedT
     }
 });
 
-// 🆕 5. RUTA PARA ACTIVAR SERVICIO (PUT /api/services/:serviceId/activate)
+// 5. RUTA PARA ACTIVAR SERVICIO (PUT /api/services/:serviceId/activate) (Sin cambios)
 router.put('/:serviceId/activate', verifyToken, ensureTenantAccess, isAllowedToManageServices, async (req: ServiceRequest<ServiceItemParams>, res: Response) => {
     const tenantSlug = req.tenantId!;
     const { serviceId } = req.params;
