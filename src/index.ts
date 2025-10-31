@@ -14,7 +14,8 @@ import staffRoutes from './routes/staffRoutes';
 import storeRoutes from './routes/storeRoutes';
 import categoryAdminRoutes from './routes/categoryAdminRoutes'; // 👈 AÑADIR
 import productAdminRoutes from './routes/productAdminRoutes'; // 👈 AÑADIR
-
+import clientAuthRoutes from './routes/clientAuthRoutes'; // 👈 AÑADIR
+import orderRoutes from './routes/orderRoutes';           // 👈 AÑADIR
 
 const app: Express = express();
 const port = process.env.PORT || 4000;
@@ -67,8 +68,10 @@ app.use('/api/external', externalRoutes);
 app.use('/api/appointments', appointmentRoutes); // Montado en /api/appointments
 app.use('/api/staff', staffRoutes); // Montado en /api/staff
 app.use('/api/store', storeRoutes);
-app.use('/api/admin/categories', categoryAdminRoutes);
-app.use('/api/admin/products', productAdminRoutes);
+app.use('/api/categories', categoryAdminRoutes);
+app.use('/api/products', productAdminRoutes);
+app.use('/api/client/auth', clientAuthRoutes); // Autenticación de Clientes
+app.use('/api/orders', orderRoutes);
 
 // Ruta de prueba
 app.get('/', (req: Request, res: Response) => {
