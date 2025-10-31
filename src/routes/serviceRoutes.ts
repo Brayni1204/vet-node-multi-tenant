@@ -1,4 +1,4 @@
-// src/routes/serviceRoutes.ts
+// src/routes/serviceRoutes.ts (Corregido)
 import { Router, Request, Response, NextFunction } from 'express';
 import pool from '../db';
 import { RowDataPacket, OkPacket } from 'mysql2';
@@ -58,15 +58,22 @@ const getDisplayImageUrl = (path: string, hostname: string) => {
 
 
 // --- MIDDLEWARES (Sin cambios) ---
+// Este middleware está diseñado para procesar el token SI existe,
+// pero permitir la solicitud si NO existe (para visitantes públicos).
 const verifyToken = (req: ServiceRequest<any>, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
     const token = authHeader?.split(' ')[1];
 
     if (!token) {
-        if (req.method === 'GET' && req.route.path === '/') return next();
+        // Si no hay token en un GET a la raíz, es un visitante.
+        if (req.method === 'GET' && req.route.path === '/') {
+            return next();
+        }
+        // Si no hay token en OTRA ruta (POST/PUT), es un error.
         return res.status(401).json({ message: 'No autenticado. Token no proporcionado.' });
     }
 
+    // Si SÍ hay token, lo procesamos (esto es lo que hará el Admin)
     try {
         const [tenant_slug, role] = token.split(':');
 
@@ -94,10 +101,13 @@ const ensureTenantAccess = async (req: ServiceRequest<any>, res: Response, next:
         return res.status(400).json({ message: 'El ID de inquilino (slug) no se encontró en la solicitud.' });
     }
 
+    // Esta lógica de omisión está bien, porque 'verifyToken' ya
+    // habrá (o no) poblado req.user.
     if (req.method === 'GET' && req.route.path === '/') {
         return next();
     }
 
+    // Para el resto de rutas (POST, PUT), req.user es obligatorio.
     if (!req.user) {
         return res.status(401).json({ message: 'Se requiere autenticación para esta acción.' });
     }
@@ -122,8 +132,10 @@ const isAllowedToManageServices = (req: ServiceRequest<any>, res: Response, next
 // -----------------------------------------------------------------------------
 
 
+// --- RUTA CORREGIDA ---
 // 1. OBTENER SERVICIOS (GET /api/services)
-router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Response) => {
+// ¡AQUÍ ESTABA EL ERROR! Faltaba el middleware 'verifyToken'.
+router.get('/', verifyToken, ensureTenantAccess, async (req: ServiceRequest<any>, res: Response) => {
     const tenantSlug = req.tenantId!;
     const { status, search } = req.query;
 
@@ -145,17 +157,17 @@ router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Respon
         `;
         const queryParams: (string | number | boolean)[] = [tenantNumericId];
 
+        // Esta lógica ahora funcionará, porque 'verifyToken' poblará 'req.user'
         const isAdmin = req.user?.role === 'admin';
 
-        // 🚨 LÓGICA DE FILTRADO CORREGIDA 🚨
         if (isAdmin) {
-            // Caso Admin: Aplicamos filtro SOLO si el estado es 'active' o 'inactive'
+            // Caso Admin: Aplicamos filtro de estado
             if (status === 'active') {
                 query += ' AND s.is_active = TRUE';
             } else if (status === 'inactive') {
                 query += ' AND s.is_active = FALSE';
             }
-            // Si status es 'all', NO añadimos condición, devolviendo todos.
+            // Si status es 'all', no se añade filtro de activo/inactivo
         } else {
             // Caso Público/No-Admin: Siempre forzamos a mostrar solo los activos
             query += ' AND s.is_active = TRUE';
@@ -175,8 +187,7 @@ router.get('/', ensureTenantAccess, async (req: ServiceRequest<any>, res: Respon
             id: row.id,
             title: row.title,
             description: row.description,
-            // Convertimos TINYINT(1) o BOOLEAN de MySQL a booleano de JavaScript
-            is_active: row.is_active === 1,
+            is_active: row.is_active === 1, // Convertir TINYINT a booleano
             image: row.image ? getDisplayImageUrl(row.image, req.hostname) : null
         }));
 
